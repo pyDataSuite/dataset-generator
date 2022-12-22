@@ -1,8 +1,7 @@
 use anyhow::Result;
 use hdf5::{
-    dataset::{Chunk, ChunkInfo, ChunkOpts},
     types::{FloatSize, IntSize, TypeDescriptor},
-    DatasetBuilder, File,
+    File,
 };
 use ndarray::s;
 use std::{

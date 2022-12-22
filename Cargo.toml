@@ -6,13 +6,12 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 [[bin]]
 name = "generator"
-path = "generator.rs"
+path = "native/generator.rs"
 
 [dependencies]
 anyhow = "1.0.68"
 hdf5 = "0.8.1"
 ndarray = "0.15.6"
-# systemstat = "0.2.2"
 sysinfo = "0.27.1"
 
 [profile.release]
