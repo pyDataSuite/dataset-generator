@@ -320,17 +320,17 @@ fn populate_data(
     let cpu = file.group("CPU")?;
     cpu.dataset("system_time")?
         .write_slice(&[sys_time as u64], s![index..index + 1])?;
+
+    let mut usages = vec![0f32; sys.cpus().len()];
+    let mut freqs = vec![0u64; sys.cpus().len()];
     for (i, _cpu) in sys.cpus().iter().enumerate() {
         let name = _cpu.name();
         let usage = _cpu.cpu_usage();
         let freq = _cpu.frequency();
 
         // Insert data into grouped datasets
-        cpu.dataset("grouped_cpu_usage")?
-            .write_slice(&[usage], s![i..i + 1, index])?;
-
-        cpu.dataset("grouped_cpu_frequency")?
-            .write_slice(&[freq], s![i..i + 1, index])?;
+        usages[i] = usage;
+        freqs[i] = freq;
 
         // Enter specific CPU information
         cpu.dataset(format!("{}_usage", name).as_str())?
@@ -338,6 +338,12 @@ fn populate_data(
         cpu.dataset(format!("{}_frequency", _cpu.name()).as_str())?
             .write_slice(&[freq], s![i..i + 1])?;
     }
+
+    // Add grouped CPU stats once
+    cpu.dataset("grouped_cpu_usage")?
+        .write_slice(&usages, s![.., index])?;
+    cpu.dataset("grouped_cpu_frequency")?
+        .write_slice(&freqs, s![.., index])?;
 
     // Insert data into the RAM datasets \\
     let ram = file.group("RAM")?;
@@ -356,18 +362,19 @@ fn populate_data(
     let disk = file.group("DISK")?;
     disk.dataset("system_time")?
         .write_slice(&[sys_time as u64], s![index..index + 1])?;
+
+    let mut avail = vec![0u64; sys.disks().len()];
+    let mut total = vec![0u64; sys.disks().len()];
     for (i, _disk) in sys.disks().iter().enumerate() {
         let name = format!("{:?}", _disk.name()).replace("/", "_");
         let available_space = _disk.available_space();
         let total_space = _disk.total_space();
         let removable = _disk.is_removable();
 
-        // Insert data into grouped datasets
-        disk.dataset("grouped_available_space")?
-            .write_slice(&[available_space], s![i..i + 1, index])?;
-        disk.dataset("grouped_total_space")?
-            .write_slice(&[total_space], s![i..i + 1, index])?;
+        avail[i] = available_space;
+        total[i] = total_space;
 
+        // Insert data into grouped datasets
         // Enter specific disk information
         disk.dataset(format!("{}_total_space", name).as_str())?
             .write_slice(&[total_space], s![i..i + 1])?;
@@ -376,6 +383,10 @@ fn populate_data(
         disk.dataset(format!("{}_is_removable", name).as_str())?
             .write_slice(&[removable], s![i..i + 1])?;
     }
+    disk.dataset("grouped_available_space")?
+        .write_slice(&avail, s![.., index])?;
+    disk.dataset("grouped_total_space")?
+        .write_slice(&total, s![.., index])?;
 
     // Insert data into the GPU datasets \\
     let gpu = file.group("GPU")?;

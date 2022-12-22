@@ -17,4 +17,4 @@ The original attempt at the dataset generator is contained in the `scripted/gene
 
 *unacceptable*
 
-After learning that, I put more time into building up a native dataset generator which is written in Rust. This one requires significantly more code, but I was very hopeful it would execute much faster. After a minimum working script was created, I discovered that the native solution would be complete in a little over 5 days. That's 2 days faster than python, but still unacceptably slow. If you would like to see a log of my efforts to optimize this performance, please visit [this readme](native/perfomance/README.md)
+After learning that, I put more time into building up a native dataset generator which is written in Rust. This one requires significantly more code, but I was very hopeful it would execute much faster. After a minimum working script was created, I discovered that the native solution would be complete in a little over 5 days. That's 2 days faster than python, but still unacceptably slow. If you would like to see a log of my efforts to optimize this performance, please visit [this readme](native/performance/README.md)

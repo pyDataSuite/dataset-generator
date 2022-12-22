@@ -44,3 +44,21 @@ The predicted* runtime for a release build is
 In its current implementation, the dataset generator, is writing each individual measurement to the hdf5 file as it obtains them. It was partially done this way because I was under the impression that HDF5 did buffered reading and writing by default. After viewing the flamegraph, I no longer hold that viewpoint.
 
 An easy optimization, and the first one I will perform, is not appending single elements to multidimensional datasets like the `grouped_cpu_frequency`. Instead, I can write the frequency for all cpus at once. This should lower the amount of time the write_slice function runs for in total.
+
+After completing the work above, our current flamegraph is looking a little more even:
+
+[![optimization_one.svg](optimization_one.svg)](optimization_one.svg)
+
+In fact, the new predicted runtime is
+```
+4 days 11 hours 28 minute and 57 seconds
+```
+
+That is honestly way more than I would expect out of such a small change. I didn't think these excess writes had this big an effect!
+
+# Optimization 2
+Even though the `write_slice` function still makes up about half of the execution time of the `populate_data` function, I am going to switch gears for optimization two. In the flamegraph, `write_slice` is between two large 'flames' which appear to be related to the hdf5 datasets I am using.
+
+I am led to believe that calling `file.dataset("dataset_name")` is causing a new read operation on the file every measurement frame. Furthermore, since the datasets are not being stored into a variable, they are also being destroyed every frame. I believe this is why there are large dataset-centered chunks of time being taken up before and after actually writing to the dataset.
+
+The solution to Optimization 2 involves storing the datasets when they are created, and keeping them in memory until the end of the program. This will mean the loading and saving bits only really need to be called once, not 10,800,000 times as they currently are.
