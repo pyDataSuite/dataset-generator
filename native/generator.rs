@@ -59,9 +59,9 @@ fn main() -> Result<()> {
                 "  Update: {}/{} measurements taken. Complete in {}d {}h {}m {}s",
                 index,
                 TARGET,
-                days_remaining,
-                hours_remaining,
-                minutes_remaining,
+                days_remaining.floor(),
+                hours_remaining.floor(),
+                minutes_remaining.floor(),
                 seconds_remaining
             );
         }
