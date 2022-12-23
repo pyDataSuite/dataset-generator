@@ -1,7 +1,7 @@
 use anyhow::Result;
 use hdf5::{
     types::{FloatSize, IntSize, TypeDescriptor},
-    File,
+    Dataset, DatasetBuilder, File,
 };
 use ndarray::s;
 use std::{
@@ -13,7 +13,62 @@ use sysinfo::{ComponentExt, CpuExt, CpuRefreshKind, DiskExt, RefreshKind, System
 use TypeDescriptor::*;
 
 const TARGET: usize = 10_800_000;
-const CHUNKSIZE: usize = 1000000;
+const CHUNK_SIZE: usize = 1000000;
+
+struct SensorDataHandler<F>
+where
+    F: Fn(&Dataset, usize) -> Result<()>,
+{
+    dataset: Dataset,
+    update_fn: F,
+}
+
+trait GroupOrFile {
+    fn builder(&self) -> DatasetBuilder;
+}
+impl GroupOrFile for hdf5::Group {
+    fn builder(&self) -> DatasetBuilder {
+        self.new_dataset_builder()
+    }
+}
+impl GroupOrFile for hdf5::File {
+    fn builder(&self) -> DatasetBuilder {
+        // self.new_dataset_builder()
+        self.new_dataset_builder()
+    }
+}
+
+impl<F> SensorDataHandler<F>
+where
+    F: Fn(&Dataset, usize) -> Result<()>,
+{
+    fn update(&self, index: usize) -> Result<()> {
+        (self.update_fn)(&self.dataset, index)?;
+        Ok(())
+    }
+
+    fn new<P>(
+        parent: &P,
+        name: impl AsRef<str>,
+        type_descriptor: TypeDescriptor,
+        depth: usize,
+        func: F,
+    ) -> Result<Self>
+    where
+        P: GroupOrFile,
+    {
+        // let extents = if depth > 0 { (depth, TARGET) } else { TARGET };
+        let name = name.as_ref();
+        Ok(Self {
+            dataset: parent
+                .builder()
+                .empty_as(&type_descriptor)
+                .shape((depth, TARGET))
+                .create(name)?,
+            update_fn: func,
+        })
+    }
+}
 
 fn main() -> Result<()> {
     // Initialize the system information struct
@@ -125,35 +180,60 @@ fn initialize_data_file(sys: &System) -> Result<File> {
     let disk = file.create_group("DISK")?;
     let gpu = file.create_group("GPU")?;
 
+    // Get the list of SensorDataHandlers
+    let sensorHandlers: Vec<SensorDataHandler> = vec![];
+
     // Generate datasets for the CPUs
     let num_cpus = sys.cpus().len();
     cpu.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("system_time")?;
 
-    cpu.new_dataset_builder()
-        .chunk((num_cpus, CHUNKSIZE))
-        .empty_as(&Float(FloatSize::U4))
-        .shape((num_cpus, TARGET))
-        .create("grouped_cpu_usage")?;
+    // let ds = cpu
+    //     .new_dataset_builder()
+    //     .chunk((num_cpus, CHUNK_SIZE))
+    //     .empty_as(&Float(FloatSize::U4))
+    //     .shape((num_cpus, TARGET))
+    //     .create("grouped_cpu_usage")?;
+
+    // let cpu_usages = SensorDataHandler {
+    //     dataset: ds,
+    //     update_fn: |data: &Dataset, index: usize| -> Result<()> {
+    //         let cpu_usage_tot: Vec<f32> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
+    //         data.write_slice(&cpu_usage_tot, s![.., index])?;
+    //         Ok(())
+    //     },
+    // };
+
+    let cpu_usages = SensorDataHandler::new(
+        &cpu,
+        "grouped_cpu_usage",
+        Float(FloatSize::U4),
+        num_cpus,
+        |data: &Dataset, index: usize| -> Result<()> {
+            let cpu_usage_tot: Vec<f32> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
+            data.write_slice(&cpu_usage_tot, s![.., index])?;
+            Ok(())
+        },
+    );
 
     cpu.new_dataset_builder()
-        .chunk((num_cpus, CHUNKSIZE))
+        .chunk((num_cpus, CHUNK_SIZE))
         .empty_as(&Float(FloatSize::U4))
         .shape((num_cpus, TARGET))
         .create("grouped_cpu_frequency")?;
 
     for _cpu in sys.cpus() {
         cpu.new_dataset_builder()
-            .chunk(CHUNKSIZE)
+            .chunk(CHUNK_SIZE)
             .empty_as(&Float(FloatSize::U4))
             .shape(TARGET)
             .create(format!("{}_usage", _cpu.name()).as_str())?;
 
         cpu.new_dataset_builder()
-            .chunk(CHUNKSIZE)
+            .chunk(CHUNK_SIZE)
             .empty_as(&Float(FloatSize::U4))
             .shape(TARGET)
             .create(format!("{}_frequency", _cpu.name()).as_str())?;
@@ -169,31 +249,31 @@ fn initialize_data_file(sys: &System) -> Result<File> {
 
     // Generate datasets for the RAM
     ram.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("system_time")?;
 
     ram.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("total_memory")?;
 
     ram.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("used_memory")?;
 
     ram.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("total_swap")?;
 
     ram.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("used_swap")?;
@@ -201,19 +281,19 @@ fn initialize_data_file(sys: &System) -> Result<File> {
     // Generate datasets for the DISK
     let num_disks = sys.disks().len();
     disk.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("system_time")?;
 
     disk.new_dataset_builder()
-        .chunk((num_disks, CHUNKSIZE))
+        .chunk((num_disks, CHUNK_SIZE))
         .empty_as(&Unsigned(IntSize::U8))
         .shape((num_disks, TARGET))
         .create("grouped_available_space")?;
 
     disk.new_dataset_builder()
-        .chunk((num_disks, CHUNKSIZE))
+        .chunk((num_disks, CHUNK_SIZE))
         .empty_as(&Unsigned(IntSize::U8))
         .shape((num_disks, TARGET))
         .create("grouped_total_space")?;
@@ -222,19 +302,19 @@ fn initialize_data_file(sys: &System) -> Result<File> {
         let name = format!("{:?}", _disk.name()).replace("/", "_");
 
         disk.new_dataset_builder()
-            .chunk(CHUNKSIZE)
+            .chunk(CHUNK_SIZE)
             .empty_as(&Unsigned(IntSize::U8))
             .shape(TARGET)
             .create(format!("{}_available_space", name).as_str())?;
 
         disk.new_dataset_builder()
-            .chunk(CHUNKSIZE)
+            .chunk(CHUNK_SIZE)
             .empty_as(&Unsigned(IntSize::U8))
             .shape(TARGET)
             .create(format!("{}_total_space", name).as_str())?;
 
         disk.new_dataset_builder()
-            .chunk(CHUNKSIZE)
+            .chunk(CHUNK_SIZE)
             .empty_as(&Boolean)
             .shape(TARGET)
             .create(format!("{}_is_removable", name).as_str())?;
@@ -263,44 +343,44 @@ fn initialize_data_file(sys: &System) -> Result<File> {
             .new_dataset_builder()
             .empty_as(&Float(FloatSize::U4))
             .shape((3, TARGET))
-            .chunk([3, CHUNKSIZE])
+            .chunk([3, CHUNK_SIZE])
             .create(comp_name.as_str())?;
     }
 
     // Generate datasets for the GPU
     gpu.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("system_time")?;
 
     // Now add datasets that correspond to the actual dataset generation
     file.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("system_time")?;
 
     file.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("time_elapsed")?;
 
     file.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("measurements_taken")?;
 
     file.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("measurements_remaining")?;
 
     file.new_dataset_builder()
-        .chunk(CHUNKSIZE)
+        .chunk(CHUNK_SIZE)
         .empty_as(&Unsigned(IntSize::U8))
         .shape(TARGET)
         .create("time_remaining")?;
@@ -443,59 +523,3 @@ fn populate_data(
 
     Ok(time_remaining)
 }
-
-// Please note that we use "new_all" to ensure that all list of
-// components, network interfaces, disks and users are already
-// filled!
-// let mut sys = System::new_all();
-
-// First we update all information of our `System` struct.
-// sys.refresh_all();
-
-// We display all disks' information:
-// println!("=> disks:");
-// for disk in sys.disks() {
-//     println!("{:?}", disk);
-// }
-
-// Network interfaces name, data received and data transmitted:
-// println!("=> networks:");
-// for (interface_name, data) in sys.networks() {
-//     println!(
-//         "{}: {}/{} B",
-//         interface_name,
-//         data.received(),
-//         data.transmitted()
-//     );
-// }
-
-// Components temperature:
-// println!("=> components:");
-// for component in sys.components() {
-//     println!("{:?}", component);
-// }
-
-// println!("=> system:");
-// RAM and swap information:
-// println!("total memory: {} bytes", sys.total_memory());
-// println!("used memory : {} bytes", sys.used_memory());
-// println!("total swap  : {} bytes", sys.total_swap());
-// println!("used swap   : {} bytes", sys.used_swap());
-
-// Display system information:
-// println!("System name:             {:?}", sys.name());
-// println!("System kernel version:   {:?}", sys.kernel_version());
-// println!("System OS version:       {:?}", sys.os_version());
-// println!("System host name:        {:?}", sys.host_name());
-
-// Number of CPUs:
-// println!("NB CPUs: {}", sys.cpus().len());
-// for cpu in sys.cpus() {
-//     cpu.
-//     println!(" CPU: {:?}", cpu);
-// }
-
-// Display processes ID, name na disk usage:
-// for (pid, process) in sys.processes() {
-//     println!("[{}] {} {:?}", pid, process.name(), process.disk_usage());
-// }
