@@ -1,27 +1,23 @@
 use anyhow::Result;
 use hdf5::{
     types::{FloatSize, IntSize, TypeDescriptor},
-    Dataset, DatasetBuilder, File,
+    Dataset, DatasetBuilder, Extents, File, Group,
 };
 use ndarray::s;
 use std::{
+    cell::{Ref, RefCell},
     fs::remove_file,
     path::Path,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    rc::Rc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{ComponentExt, CpuExt, CpuRefreshKind, DiskExt, RefreshKind, System, SystemExt};
 use TypeDescriptor::*;
 
 const TARGET: usize = 10_800_000;
-const CHUNK_SIZE: usize = 1000000;
-
-struct SensorDataHandler<F>
-where
-    F: Fn(&Dataset, usize) -> Result<()>,
-{
-    dataset: Dataset,
-    update_fn: F,
-}
+// const BUFFER_SIZE: usize = 1000000;
+type SystemPtr = Rc<RefCell<System>>;
+type SensorList = Vec<SensorDataHandler>;
 
 trait GroupOrFile {
     fn builder(&self) -> DatasetBuilder;
@@ -38,34 +34,40 @@ impl GroupOrFile for hdf5::File {
     }
 }
 
-impl<F> SensorDataHandler<F>
-where
-    F: Fn(&Dataset, usize) -> Result<()>,
-{
+struct SensorDataHandler {
+    dataset: Dataset,
+    update_fn: Box<dyn Fn(&Dataset, Ref<System>, usize) -> Result<()>>,
+    system: SystemPtr,
+}
+
+impl SensorDataHandler {
     fn update(&self, index: usize) -> Result<()> {
-        (self.update_fn)(&self.dataset, index)?;
+        (self.update_fn)(&self.dataset, self.system.borrow(), index)?;
         Ok(())
     }
 
-    fn new<P>(
-        parent: &P,
+    fn new(
+        parent: &impl GroupOrFile,
         name: impl AsRef<str>,
         type_descriptor: TypeDescriptor,
         depth: usize,
-        func: F,
-    ) -> Result<Self>
-    where
-        P: GroupOrFile,
-    {
-        // let extents = if depth > 0 { (depth, TARGET) } else { TARGET };
+        sys: SystemPtr,
+        func: impl Fn(&Dataset, Ref<System>, usize) -> Result<()> + 'static,
+    ) -> Result<Self> {
         let name = name.as_ref();
+        let extents = match depth {
+            0 => Extents::new(TARGET),
+            d => Extents::new((d, TARGET)),
+        };
         Ok(Self {
             dataset: parent
                 .builder()
+                // .chunk(chunk)
                 .empty_as(&type_descriptor)
-                .shape((depth, TARGET))
+                .shape(extents)
                 .create(name)?,
-            update_fn: func,
+            system: sys,
+            update_fn: Box::new(func),
         })
     }
 }
@@ -73,35 +75,37 @@ where
 fn main() -> Result<()> {
     // Initialize the system information struct
     println!("Initializing system measurements...");
-    let mut sys = initialize_system();
+    let sys: Rc<RefCell<_>> = Rc::new(RefCell::new(initialize_system()));
     let systime = SystemTime::now();
 
     // Generate dataset file
     println!("Allocating space for data file...");
-    let file = initialize_data_file(&sys)?;
+    let (file, sensor_handlers) = initialize_data_file(Rc::clone(&sys), systime)?;
 
     // Loop to collect data
     println!("Beginning to collect data...");
     for index in 0..2000 {
         // Refresh system information
-        sys.refresh_components_list();
-        sys.refresh_cpu();
-        sys.refresh_disks_list();
-        sys.refresh_memory();
+        {
+            let mut sys_ref = sys.borrow_mut();
+            sys_ref.refresh_components_list();
+            sys_ref.refresh_cpu();
+            sys_ref.refresh_disks_list();
+            sys_ref.refresh_memory();
+        }
 
-        // Store data
-        let t_remaining = populate_data(
-            &sys,
-            &file,
-            index,
-            systime.duration_since(UNIX_EPOCH)?.as_millis(),
-            systime.elapsed()?.as_millis(),
-        )?;
+        for sensor_handler in &sensor_handlers {
+            sensor_handler.update(index)?;
+        }
 
-        // Print a status update every 1000 measurements
+        // Print a status update every 100 measurements
         if index % 100 == 0 {
-            let mut t_remaining = Duration::from_millis(t_remaining.floor() as u64).as_secs_f64();
-            // let mut t_remaining = 24.467_f64;
+            let time_elapsed = SystemTime::now().duration_since(systime)?.as_secs_f64();
+            let measurements_taken = index + 1;
+            let measurements_remaining = TARGET - measurements_taken;
+            let mut t_remaining =
+                measurements_remaining as f64 * time_elapsed / measurements_taken as f64;
+
             let days_remaining = t_remaining / 3600.0 / 24.0;
             t_remaining = days_remaining - days_remaining.floor();
             let hours_remaining = t_remaining * 24.0;
@@ -142,7 +146,11 @@ fn initialize_system() -> System {
     System::new_with_specifics(refreshkind)
 }
 
-fn initialize_data_file(sys: &System) -> Result<File> {
+fn initialize_data_file(
+    sys: SystemPtr,
+    sys_time: SystemTime,
+) -> Result<(File, Vec<SensorDataHandler>)> {
+    // let sys = sys.borrow_mut();
     // Remove data file if it already exists
     let file_path = Path::new("dataset.hdf5");
     if file_path.exists() {
@@ -153,334 +161,446 @@ fn initialize_data_file(sys: &System) -> Result<File> {
     let file = File::create(file_path)?;
 
     // Add system information as attributes to the root of the file
-    if let Some(name) = sys.name() {
+    if let Some(name) = sys.borrow().name() {
         file.new_attr_builder()
             .with_data(&name)
             .create("SystemName")?;
     }
-    if let Some(kernel_version) = sys.kernel_version() {
+    if let Some(kernel_version) = sys.borrow().kernel_version() {
         file.new_attr_builder()
             .with_data(&kernel_version)
             .create("KernelVersion")?;
     }
-    if let Some(os_version) = sys.os_version() {
+    if let Some(os_version) = sys.borrow().os_version() {
         file.new_attr_builder()
             .with_data(&os_version)
             .create("OsVersion")?;
     }
-    if let Some(host_name) = sys.host_name() {
+    if let Some(host_name) = sys.borrow().host_name() {
         file.new_attr_builder()
             .with_data(&host_name)
             .create("HostName")?;
     }
 
-    // Generate groups for CPU, RAM, and DISK
-    let cpu = file.create_group("CPU")?;
-    let ram = file.create_group("RAM")?;
-    let disk = file.create_group("DISK")?;
-    let gpu = file.create_group("GPU")?;
-
     // Get the list of SensorDataHandlers
-    let sensorHandlers: Vec<SensorDataHandler> = vec![];
+    let mut sensor_handlers: Vec<SensorDataHandler> = vec![];
 
-    // Generate datasets for the CPUs
-    let num_cpus = sys.cpus().len();
-    cpu.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("system_time")?;
+    // Get information about specific systems
+    let (cpu, mut cpu_handlers) = initialize_cpu_data(&file, Rc::clone(&sys), sys_time)?;
+    let (_ram, mut ram_handlers) = initialize_ram_data(&file, Rc::clone(&sys), sys_time)?;
+    let (disk, mut disk_handlers) = initialize_disk_data(&file, Rc::clone(&sys), sys_time)?;
+    let (gpu, mut gpu_handlers) = initialize_gpu_data(&file, Rc::clone(&sys), sys_time)?;
+    let mut comp_handlers = initialize_comp_data(&cpu, &disk, &gpu, Rc::clone(&sys))?;
 
-    // let ds = cpu
-    //     .new_dataset_builder()
-    //     .chunk((num_cpus, CHUNK_SIZE))
-    //     .empty_as(&Float(FloatSize::U4))
-    //     .shape((num_cpus, TARGET))
-    //     .create("grouped_cpu_usage")?;
+    // Add handlers to the overall handler list
+    sensor_handlers.append(&mut cpu_handlers);
+    sensor_handlers.append(&mut ram_handlers);
+    sensor_handlers.append(&mut disk_handlers);
+    sensor_handlers.append(&mut gpu_handlers);
+    sensor_handlers.append(&mut comp_handlers);
 
-    // let cpu_usages = SensorDataHandler {
-    //     dataset: ds,
-    //     update_fn: |data: &Dataset, index: usize| -> Result<()> {
-    //         let cpu_usage_tot: Vec<f32> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
-    //         data.write_slice(&cpu_usage_tot, s![.., index])?;
-    //         Ok(())
-    //     },
-    // };
+    // Now add datasets that correspond to the actual dataset generation
+    sensor_handlers.push(SensorDataHandler::new(
+        &file,
+        "system_time",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, _, index| -> Result<()> {
+            data.write_slice(
+                &[SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()],
+                s![index..index + 1],
+            )?;
+            Ok(())
+        },
+    )?);
 
-    let cpu_usages = SensorDataHandler::new(
-        &cpu,
+    sensor_handlers.push(SensorDataHandler::new(
+        &file,
+        "time_elapsed",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        move |data, _, index| -> Result<()> {
+            data.write_slice(
+                &[SystemTime::now().duration_since(sys_time)?.as_millis() as u64],
+                s![index..index + 1],
+            )?;
+            Ok(())
+        },
+    )?);
+
+    sensor_handlers.push(SensorDataHandler::new(
+        &file,
+        "measurements_taken",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        move |data, _, index| -> Result<()> {
+            data.write_slice(&[index + 1], s![index..index + 1])?;
+            Ok(())
+        },
+    )?);
+
+    sensor_handlers.push(SensorDataHandler::new(
+        &file,
+        "measurements_remaining",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        move |data, _, index| -> Result<()> {
+            data.write_slice(&[TARGET - index - 1], s![index..index + 1])?;
+            Ok(())
+        },
+    )?);
+
+    // Return the file instance
+    Ok((file, sensor_handlers))
+}
+
+fn initialize_cpu_data(
+    file: &File,
+    sys: SystemPtr,
+    _time: SystemTime,
+) -> Result<(Group, SensorList)> {
+    // Get specific constants
+    let mut cpu_sensors = SensorList::new();
+    let cpu_group = file.create_group("CPU")?;
+    let num_cpus = sys.borrow().cpus().len();
+
+    ////////////////////
+    // System time
+    cpu_sensors.push(SensorDataHandler::new(
+        &cpu_group,
+        "system_time",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, _, index| -> Result<()> {
+            data.write_slice(
+                &[SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()],
+                s![index..index + 1],
+            )?;
+            Ok(())
+        },
+    )?);
+
+    ////////////////////
+    // Grouped CPU Usage
+    cpu_sensors.push(SensorDataHandler::new(
+        &cpu_group,
         "grouped_cpu_usage",
         Float(FloatSize::U4),
         num_cpus,
-        |data: &Dataset, index: usize| -> Result<()> {
-            let cpu_usage_tot: Vec<f32> = sys.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            let cpu_usage_tot: Vec<f32> = system.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
             data.write_slice(&cpu_usage_tot, s![.., index])?;
             Ok(())
         },
-    );
+    )?);
 
-    cpu.new_dataset_builder()
-        .chunk((num_cpus, CHUNK_SIZE))
-        .empty_as(&Float(FloatSize::U4))
-        .shape((num_cpus, TARGET))
-        .create("grouped_cpu_frequency")?;
+    // Grouped CPU Frequency
+    cpu_sensors.push(SensorDataHandler::new(
+        &cpu_group,
+        "grouped_cpu_frequency",
+        Unsigned(IntSize::U8),
+        num_cpus,
+        Rc::clone(&sys),
+        |data, system, index| {
+            let cpu_freq_list: Vec<_> = system.cpus().iter().map(|cpu| cpu.frequency()).collect();
+            data.write_slice(&cpu_freq_list, s![.., index])?;
+            Ok(())
+        },
+    )?);
 
-    for _cpu in sys.cpus() {
-        cpu.new_dataset_builder()
-            .chunk(CHUNK_SIZE)
-            .empty_as(&Float(FloatSize::U4))
-            .shape(TARGET)
-            .create(format!("{}_usage", _cpu.name()).as_str())?;
+    // Per-CPU Stats
+    for (i, cpu) in sys.borrow().cpus().iter().enumerate() {
+        cpu_sensors.push(SensorDataHandler::new(
+            &cpu_group,
+            format!("{}_usage", cpu.name()),
+            Float(FloatSize::U4),
+            0,
+            Rc::clone(&sys),
+            move |data, system, index| {
+                data.write_slice(&[system.cpus()[i].cpu_usage()], s![index..index + 1])?;
+                Ok(())
+            },
+        )?);
 
-        cpu.new_dataset_builder()
-            .chunk(CHUNK_SIZE)
-            .empty_as(&Float(FloatSize::U4))
-            .shape(TARGET)
-            .create(format!("{}_frequency", _cpu.name()).as_str())?;
+        cpu_sensors.push(SensorDataHandler::new(
+            &cpu_group,
+            format!("{}_frequency", cpu.name()),
+            Unsigned(IntSize::U8),
+            0,
+            Rc::clone(&sys),
+            move |data, system, index| {
+                data.write_slice(&[system.cpus()[i].cpu_usage()], s![index..index + 1])?;
+                Ok(())
+            },
+        )?);
     }
 
-    cpu.new_attr_builder()
-        .with_data(sys.cpus()[0].brand())
+    // Add CPU Metadata
+    cpu_group
+        .new_attr_builder()
+        .with_data(sys.borrow().cpus()[0].brand())
         .create("Brand")?;
 
-    cpu.new_attr_builder()
-        .with_data(sys.cpus()[0].vendor_id())
+    cpu_group
+        .new_attr_builder()
+        .with_data(sys.borrow().cpus()[0].vendor_id())
         .create("VendorId")?;
 
-    // Generate datasets for the RAM
-    ram.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("system_time")?;
-
-    ram.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("total_memory")?;
-
-    ram.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("used_memory")?;
-
-    ram.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("total_swap")?;
-
-    ram.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("used_swap")?;
-
-    // Generate datasets for the DISK
-    let num_disks = sys.disks().len();
-    disk.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("system_time")?;
-
-    disk.new_dataset_builder()
-        .chunk((num_disks, CHUNK_SIZE))
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape((num_disks, TARGET))
-        .create("grouped_available_space")?;
-
-    disk.new_dataset_builder()
-        .chunk((num_disks, CHUNK_SIZE))
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape((num_disks, TARGET))
-        .create("grouped_total_space")?;
-
-    for _disk in sys.disks() {
-        let name = format!("{:?}", _disk.name()).replace("/", "_");
-
-        disk.new_dataset_builder()
-            .chunk(CHUNK_SIZE)
-            .empty_as(&Unsigned(IntSize::U8))
-            .shape(TARGET)
-            .create(format!("{}_available_space", name).as_str())?;
-
-        disk.new_dataset_builder()
-            .chunk(CHUNK_SIZE)
-            .empty_as(&Unsigned(IntSize::U8))
-            .shape(TARGET)
-            .create(format!("{}_total_space", name).as_str())?;
-
-        disk.new_dataset_builder()
-            .chunk(CHUNK_SIZE)
-            .empty_as(&Boolean)
-            .shape(TARGET)
-            .create(format!("{}_is_removable", name).as_str())?;
-    }
-
-    // Create dataset for component temperatures
-    for _comp in sys.components() {
-        // Get component name without spaces
-        let mut comp_name = _comp.label().replace(" ", "_");
-
-        // Select proper group based on component name
-        let group = match &comp_name {
-            x if x.contains("nvme") => &disk,
-            x if x.contains("core") => &cpu,
-            x if x.contains("gpu") => &gpu,
-            _ => continue, // If a group isn't found, skip to the next component
-        };
-
-        // Add temp to name if not already present
-        if !comp_name.to_lowercase().contains("temp") {
-            comp_name = comp_name + "_temps";
-        }
-
-        // Generate dataset
-        group
-            .new_dataset_builder()
-            .empty_as(&Float(FloatSize::U4))
-            .shape((3, TARGET))
-            .chunk([3, CHUNK_SIZE])
-            .create(comp_name.as_str())?;
-    }
-
-    // Generate datasets for the GPU
-    gpu.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("system_time")?;
-
-    // Now add datasets that correspond to the actual dataset generation
-    file.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("system_time")?;
-
-    file.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("time_elapsed")?;
-
-    file.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("measurements_taken")?;
-
-    file.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("measurements_remaining")?;
-
-    file.new_dataset_builder()
-        .chunk(CHUNK_SIZE)
-        .empty_as(&Unsigned(IntSize::U8))
-        .shape(TARGET)
-        .create("time_remaining")?;
-
-    // Return the file instance
-    Ok(file)
+    Ok((cpu_group, cpu_sensors))
 }
 
-fn populate_data(
-    sys: &System,
+fn initialize_ram_data(
     file: &File,
-    index: usize,
-    sys_time: u128,
-    time_elapsed: u128,
-) -> Result<f64> {
-    // Insert data into the CPU datasets \\
-    let cpu = file.group("CPU")?;
-    cpu.dataset("system_time")?
-        .write_slice(&[sys_time as u64], s![index..index + 1])?;
+    sys: SystemPtr,
+    _time: SystemTime,
+) -> Result<(Group, SensorList)> {
+    // Get specific constants
+    let mut ram_sensors = SensorList::new();
+    let ram_group = file.create_group("RAM")?;
 
-    let mut usages = vec![0f32; sys.cpus().len()];
-    let mut freqs = vec![0u64; sys.cpus().len()];
-    for (i, _cpu) in sys.cpus().iter().enumerate() {
-        let name = _cpu.name();
-        let usage = _cpu.cpu_usage();
-        let freq = _cpu.frequency();
+    ////////////////////
+    // System time
+    ram_sensors.push(SensorDataHandler::new(
+        &ram_group,
+        "system_time",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, _, index| -> Result<()> {
+            data.write_slice(
+                &[SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()],
+                s![index..index + 1],
+            )?;
+            Ok(())
+        },
+    )?);
 
-        // Insert data into grouped datasets
-        usages[i] = usage;
-        freqs[i] = freq;
+    ////////////////////
+    // Generate RAM Sensor Handlers
+    ram_sensors.push(SensorDataHandler::new(
+        &ram_group,
+        "total_memory",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            data.write_slice(&[system.total_memory()], s![index..index + 1])?;
+            Ok(())
+        },
+    )?);
 
-        // Enter specific CPU information
-        cpu.dataset(format!("{}_usage", name).as_str())?
-            .write_slice(&[usage], s![i..i + 1])?;
-        cpu.dataset(format!("{}_frequency", _cpu.name()).as_str())?
-            .write_slice(&[freq], s![i..i + 1])?;
+    ram_sensors.push(SensorDataHandler::new(
+        &ram_group,
+        "used_memory",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            data.write_slice(&[system.used_memory()], s![index..index + 1])?;
+            Ok(())
+        },
+    )?);
+
+    ram_sensors.push(SensorDataHandler::new(
+        &ram_group,
+        "total_swap",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            data.write_slice(&[system.total_swap()], s![index..index + 1])?;
+            Ok(())
+        },
+    )?);
+
+    ram_sensors.push(SensorDataHandler::new(
+        &ram_group,
+        "used_swap",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            data.write_slice(&[system.used_swap()], s![index..index + 1])?;
+            Ok(())
+        },
+    )?);
+
+    Ok((ram_group, ram_sensors))
+}
+
+fn initialize_disk_data(
+    file: &File,
+    sys: SystemPtr,
+    _time: SystemTime,
+) -> Result<(Group, SensorList)> {
+    // Get specific constants
+    let mut disk_sensors = SensorList::new();
+    let disk_group = file.create_group("DISK")?;
+    let num_disks = sys.borrow().disks().len();
+
+    ////////////////////
+    // System time
+    disk_sensors.push(SensorDataHandler::new(
+        &disk_group,
+        "system_time",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, _, index| -> Result<()> {
+            data.write_slice(
+                &[SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()],
+                s![index..index + 1],
+            )?;
+            Ok(())
+        },
+    )?);
+
+    ////////////////////
+    // Grouped Disk Info
+    disk_sensors.push(SensorDataHandler::new(
+        &disk_group,
+        "grouped_available_space",
+        Unsigned(IntSize::U8),
+        num_disks,
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            let disk_availabilities: Vec<_> = system
+                .disks()
+                .iter()
+                .map(|disk| disk.available_space())
+                .collect();
+            data.write_slice(&disk_availabilities, s![.., index])?;
+            Ok(())
+        },
+    )?);
+
+    disk_sensors.push(SensorDataHandler::new(
+        &disk_group,
+        "grouped_total_space",
+        Unsigned(IntSize::U8),
+        num_disks,
+        Rc::clone(&sys),
+        |data, system, index| -> Result<()> {
+            let disk_space: Vec<_> = system
+                .disks()
+                .iter()
+                .map(|disk| disk.total_space())
+                .collect();
+            data.write_slice(&disk_space, s![.., index])?;
+            Ok(())
+        },
+    )?);
+
+    // Per-CPU Stats
+    for (i, disk) in sys.borrow().disks().iter().enumerate() {
+        let disk_name = format!("{:?}_available_space", disk.name()).replace("/", "_");
+
+        disk_sensors.push(SensorDataHandler::new(
+            &disk_group,
+            format!("{}_available_space", disk_name),
+            Unsigned(IntSize::U8),
+            0,
+            Rc::clone(&sys),
+            move |data, system, index| {
+                data.write_slice(&[system.disks()[i].available_space()], s![index..index + 1])?;
+                Ok(())
+            },
+        )?);
+
+        disk_sensors.push(SensorDataHandler::new(
+            &disk_group,
+            format!("{}_total_space", disk_name),
+            Unsigned(IntSize::U8),
+            0,
+            Rc::clone(&sys),
+            move |data, system, index| {
+                data.write_slice(&[system.disks()[i].total_space()], s![index..index + 1])?;
+                Ok(())
+            },
+        )?);
+
+        disk_sensors.push(SensorDataHandler::new(
+            &disk_group,
+            format!("{}_is_removable", disk_name),
+            Boolean,
+            0,
+            Rc::clone(&sys),
+            move |data, system, index| {
+                data.write_slice(&[system.disks()[i].is_removable()], s![index..index + 1])?;
+                Ok(())
+            },
+        )?);
     }
 
-    // Add grouped CPU stats once
-    cpu.dataset("grouped_cpu_usage")?
-        .write_slice(&usages, s![.., index])?;
-    cpu.dataset("grouped_cpu_frequency")?
-        .write_slice(&freqs, s![.., index])?;
+    // Add CPU Metadata
+    disk_group
+        .new_attr_builder()
+        .with_data(sys.borrow().cpus()[0].brand())
+        .create("Brand")?;
 
-    // Insert data into the RAM datasets \\
-    let ram = file.group("RAM")?;
-    ram.dataset("system_time")?
-        .write_slice(&[sys_time as u64], s![index..index + 1])?;
-    ram.dataset("total_memory")?
-        .write_slice(&[sys.total_memory()], s![index..index + 1])?;
-    ram.dataset("used_memory")?
-        .write_slice(&[sys.used_memory()], s![index..index + 1])?;
-    ram.dataset("total_swap")?
-        .write_slice(&[sys.total_swap()], s![index..index + 1])?;
-    ram.dataset("used_swap")?
-        .write_slice(&[sys.used_swap()], s![index..index + 1])?;
+    disk_group
+        .new_attr_builder()
+        .with_data(sys.borrow().cpus()[0].vendor_id())
+        .create("VendorId")?;
 
-    // Insert data into the DISK datasets \\
-    let disk = file.group("DISK")?;
-    disk.dataset("system_time")?
-        .write_slice(&[sys_time as u64], s![index..index + 1])?;
+    Ok((disk_group, disk_sensors))
+}
 
-    let mut avail = vec![0u64; sys.disks().len()];
-    let mut total = vec![0u64; sys.disks().len()];
-    for (i, _disk) in sys.disks().iter().enumerate() {
-        let name = format!("{:?}", _disk.name()).replace("/", "_");
-        let available_space = _disk.available_space();
-        let total_space = _disk.total_space();
-        let removable = _disk.is_removable();
+fn initialize_gpu_data(
+    file: &File,
+    sys: SystemPtr,
+    _time: SystemTime,
+) -> Result<(Group, SensorList)> {
+    // Get specific constants
+    let mut gpu_sensors = SensorList::new();
+    let gpu_group = file.create_group("GPU")?;
 
-        avail[i] = available_space;
-        total[i] = total_space;
+    ////////////////////
+    // System time
+    gpu_sensors.push(SensorDataHandler::new(
+        &gpu_group,
+        "system_time",
+        Unsigned(IntSize::U8),
+        0,
+        Rc::clone(&sys),
+        |data, _, index| -> Result<()> {
+            data.write_slice(
+                &[SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs()],
+                s![index..index + 1],
+            )?;
+            Ok(())
+        },
+    )?);
 
-        // Insert data into grouped datasets
-        // Enter specific disk information
-        disk.dataset(format!("{}_total_space", name).as_str())?
-            .write_slice(&[total_space], s![i..i + 1])?;
-        disk.dataset(format!("{}_available_space", name).as_str())?
-            .write_slice(&[available_space], s![i..i + 1])?;
-        disk.dataset(format!("{}_is_removable", name).as_str())?
-            .write_slice(&[removable], s![i..i + 1])?;
-    }
-    disk.dataset("grouped_available_space")?
-        .write_slice(&avail, s![.., index])?;
-    disk.dataset("grouped_total_space")?
-        .write_slice(&total, s![.., index])?;
+    ////////////////////
+    // Generate gpu Sensor Handlers
 
-    // Insert data into the GPU datasets \\
-    let gpu = file.group("GPU")?;
-    gpu.dataset("system_time")?
-        .write_slice(&[sys_time as u64], s![index..index + 1])?;
+    Ok((gpu_group, gpu_sensors))
+}
 
-    // Insert component temp data into relevant datasets \\
-    for _comp in sys.components() {
-        let mut comp_name = _comp.label().replace(" ", "_");
+fn initialize_comp_data(
+    cpu_group: &Group,
+    disk_group: &Group,
+    gpu_group: &Group,
+    sys: SystemPtr,
+) -> Result<SensorList> {
+    let mut sensors = SensorList::new();
 
-        let group = match &comp_name {
-            x if x.contains("nvme") => &disk,
-            x if x.contains("core") => &cpu,
-            x if x.contains("gpu") => &gpu,
+    for (i, comp) in sys.borrow().components().iter().enumerate() {
+        // Get component name
+        let mut comp_name = comp.label().replace(" ", "_");
+
+        // Select proper group based on component name
+        let group = match &comp_name.to_lowercase() {
+            x if x.contains("nvme") => disk_group,
+            x if x.contains("core") => cpu_group,
+            x if x.contains("gpu") => gpu_group,
             _ => continue,
         };
 
@@ -489,37 +609,25 @@ fn populate_data(
             comp_name = comp_name + "_temps";
         }
 
-        // Add component to dataset
-        group.dataset(comp_name.as_str())?.write_slice(
-            &[
-                _comp.temperature(),
-                _comp.max(),
-                _comp.critical().unwrap_or(0.0),
-            ],
-            s![.., index],
-        )?;
+        // Generate dataset
+        sensors.push(SensorDataHandler::new(
+            group,
+            comp_name,
+            Float(FloatSize::U4),
+            3,
+            Rc::clone(&sys),
+            move |data, system, index| {
+                data.write_slice(
+                    &[
+                        system.components()[i].temperature(),
+                        system.components()[i].max(),
+                        system.components()[i].critical().unwrap_or(0.0),
+                    ],
+                    s![.., index],
+                )?;
+                Ok(())
+            },
+        )?);
     }
-
-    // Insert data into cumulative datasets \\
-    file.dataset("system_time")?
-        .write_slice(&[sys_time as u64], s![index..index + 1])?;
-
-    file.dataset("time_elapsed")?
-        .write_slice(&[time_elapsed as u64], s![index..index + 1])?;
-
-    let measurements_taken = index + 1;
-    let measurements_remaining = TARGET - measurements_taken;
-    let time_remaining =
-        measurements_remaining as f64 * time_elapsed as f64 / measurements_taken as f64;
-
-    file.dataset("measurements_taken")?
-        .write_slice(&[measurements_taken], s![index..index + 1])?;
-
-    file.dataset("measurements_remaining")?
-        .write_slice(&[measurements_remaining], s![index..index + 1])?;
-
-    file.dataset("time_remaining")?
-        .write_slice(&[time_remaining], s![index..index + 1])?;
-
-    Ok(time_remaining)
+    Ok(vec![])
 }
