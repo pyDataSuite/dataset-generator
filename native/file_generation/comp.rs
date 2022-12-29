@@ -1,10 +1,12 @@
 use anyhow::Result;
 use hdf5::{types::TypeDescriptor::*, types::*, Group};
-use ndarray::array;
 use std::rc::Rc;
 use sysinfo::{ComponentExt, SystemExt};
 
-use crate::types::{SensorList, SystemPtr};
+use crate::{
+    data_handler::MultiSensorDataHandler,
+    types::{SensorList, SystemPtr},
+};
 
 pub fn initialize_comp_data(
     cpu_group: &Group,
@@ -16,7 +18,7 @@ pub fn initialize_comp_data(
 
     for (i, comp) in sys.borrow().components().iter().enumerate() {
         // Get component name
-        let mut comp_name = comp.label().replace(" ", "_");
+        let mut comp_name = comp.label().replace(' ', "_");
 
         // Select proper group based on component name
         let group = match &comp_name.to_lowercase() {
@@ -28,7 +30,14 @@ pub fn initialize_comp_data(
 
         // Add temp to name if not already present
         if !comp_name.to_lowercase().contains("temp") {
-            comp_name = comp_name + "_temps";
+            comp_name += "_temps";
+        }
+
+        println!("comp_name: {}", comp_name);
+
+        // Check if the component is already in the group (mostly for dual-core systems)
+        while group.member_names()?.contains(&comp_name) {
+            comp_name += "_2"
         }
 
         // Generate dataset
@@ -36,10 +45,9 @@ pub fn initialize_comp_data(
             group,
             comp_name,
             Float(FloatSize::U4),
-            3,
             Rc::clone(&sys),
             move |system| {
-                array![
+                [
                     system.components()[i].temperature(),
                     system.components()[i].max(),
                     system.components()[i].critical().unwrap_or(0.0),
@@ -47,5 +55,5 @@ pub fn initialize_comp_data(
             },
         )?));
     }
-    Ok(vec![])
+    Ok(sensors)
 }

@@ -1,12 +1,15 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use hdf5::{types::TypeDescriptor::*, types::*, File, Group};
 use std::{
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use sysinfo::SystemExt;
+use sysinfo::{DiskExt, SystemExt};
 
-use crate::types::{SensorList, SystemPtr};
+use crate::{
+    data_handler::{MultiSensorDataHandler, SensorDataHandler},
+    types::{SensorList, SystemPtr},
+};
 
 pub fn initialize_disk_data(
     file: &File,
@@ -15,8 +18,9 @@ pub fn initialize_disk_data(
 ) -> Result<(Group, SensorList)> {
     // Get specific constants
     let mut disk_sensors = SensorList::new();
-    let disk_group = file.create_group("DISK")?;
-    // let num_disks = sys.borrow().disks().len();
+    let disk_group = file
+        .create_group("DISK")
+        .with_context(|| "Trying to create disk group?")?;
 
     ////////////////////
     // System time
@@ -24,7 +28,6 @@ pub fn initialize_disk_data(
         &disk_group,
         "system_time",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |_| {
             SystemTime::now()
@@ -36,49 +39,59 @@ pub fn initialize_disk_data(
 
     ////////////////////
     // Grouped Disk Info
-    // disk_sensors.push(Box::new(SensorDataHandler::new(
-    //     &disk_group,
-    //     "grouped_available_space",
-    //     Unsigned(IntSize::U8),
-    //     num_disks,
-    //     Rc::clone(&sys),
-    //     |data, system, index| -> Result<()> {
-    //         let disk_availabilities: Vec<_> = system
-    //             .disks()
-    //             .iter()
-    //             .map(|disk| disk.available_space())
-    //             .collect();
-    //         data.write_slice(&disk_availabilities, s![.., index])?;
-    //         Ok(())
-    //     },
-    // )?));
+    disk_sensors.push(Box::new(MultiSensorDataHandler::new(
+        &disk_group,
+        "grouped_available_space",
+        Unsigned(IntSize::U8),
+        Rc::clone(&sys),
+        |system| {
+            // Create array of up to 20 disks and store the usage
+            let mut ret_array = [0_u64; 20];
+            for (i, disk) in system.disks().iter().enumerate() {
+                if i > 20 {
+                    continue;
+                };
+                ret_array[i] = disk.available_space();
+            }
 
-    // disk_sensors.push(Box::new(SensorDataHandler::new(
-    //     &disk_group,
-    //     "grouped_total_space",
-    //     Unsigned(IntSize::U8),
-    //     num_disks,
-    //     Rc::clone(&sys),
-    //     |data, system, index| -> Result<()> {
-    //         let disk_space: Vec<_> = system
-    //             .disks()
-    //             .iter()
-    //             .map(|disk| disk.total_space())
-    //             .collect();
-    //         data.write_slice(&disk_space, s![.., index])?;
-    //         Ok(())
-    //     },
-    // )?));
+            ret_array
+        },
+    )?));
+
+    disk_sensors.push(Box::new(MultiSensorDataHandler::new(
+        &disk_group,
+        "grouped_total_space",
+        Unsigned(IntSize::U8),
+        Rc::clone(&sys),
+        |system| {
+            // Create array of up to 20 disks and store the usage
+            let mut ret_array = [0_u64; 20];
+            for (i, disk) in system.disks().iter().enumerate() {
+                if i > 20 {
+                    continue;
+                };
+                ret_array[i] = disk.total_space();
+            }
+
+            ret_array
+        },
+    )?));
 
     // Per-disk Stats
     for (i, disk) in sys.borrow().disks().iter().enumerate() {
-        let disk_name = format!("{:?}_available_space", disk.name()).replace("/", "_");
+        let mut disk_name = format!("{:?}", disk.name())
+            .replace('/', "_")
+            .replace('"', "");
+
+        while disk_group.member_names()?[0].contains(&disk_name) {
+            disk_name += "_2"
+        }
+        println!("Disk: {}", disk_name);
 
         disk_sensors.push(Box::new(SensorDataHandler::new(
             &disk_group,
             format!("{}_available_space", disk_name),
             Unsigned(IntSize::U8),
-            0,
             Rc::clone(&sys),
             move |system| system.disks()[i].available_space(),
         )?));
@@ -87,7 +100,6 @@ pub fn initialize_disk_data(
             &disk_group,
             format!("{}_total_space", disk_name),
             Unsigned(IntSize::U8),
-            0,
             Rc::clone(&sys),
             move |system| system.disks()[i].total_space(),
         )?));
@@ -96,22 +108,10 @@ pub fn initialize_disk_data(
             &disk_group,
             format!("{}_is_removable", disk_name),
             Boolean,
-            0,
             Rc::clone(&sys),
             move |system| system.disks()[i].is_removable(),
         )?));
     }
-
-    // // Add disk Metadata
-    // disk_group
-    //     .new_attr_builder()
-    //     .with_data(sys.borrow().disks()[0].brand())
-    //     .create("Brand")?;
-
-    // disk_group
-    //     .new_attr_builder()
-    //     .with_data(sys.borrow().disks()[0].vendor_id())
-    //     .create("VendorId")?;
 
     Ok((disk_group, disk_sensors))
 }

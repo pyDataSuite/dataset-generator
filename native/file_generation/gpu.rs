@@ -25,7 +25,6 @@ pub fn initialize_gpu_data(
         &gpu_group,
         "system_time",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |_| {
             SystemTime::now()

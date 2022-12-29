@@ -1,14 +1,13 @@
 use anyhow::Result;
 use hdf5::{types::TypeDescriptor::*, types::*, File, Group};
-use ndarray::array;
 use std::{
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
-use sysinfo::{ComponentExt, SystemExt};
+use sysinfo::{ SystemExt};
 
 use crate::{
-    data_handler::SensorDataHandler,
+    data_handler::{ SensorDataHandler},
     types::{SensorList, SystemPtr},
 };
 
@@ -27,7 +26,6 @@ pub fn initialize_ram_data(
         &ram_group,
         "system_time",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |_| {
             SystemTime::now()
@@ -37,13 +35,20 @@ pub fn initialize_ram_data(
         },
     )?));
 
+    // ram_sensors.push(Box::new(MultiSensorDataHandler::new(
+    //     &ram_group,
+    //     "ram_usage",
+    //     Unsigned(IntSize::U8),
+    //     Rc::clone(&sys),
+    //     |_| [0, 1, 3, 4],
+    // )?));
+
     ////////////////////
     // Generate RAM Sensor Handlers
     ram_sensors.push(Box::new(SensorDataHandler::new(
         &ram_group,
         "total_memory",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |system| system.total_memory(),
     )?));
@@ -52,7 +57,6 @@ pub fn initialize_ram_data(
         &ram_group,
         "used_memory",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |system| system.used_memory(),
     )?));
@@ -61,7 +65,6 @@ pub fn initialize_ram_data(
         &ram_group,
         "total_swap",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |system| system.total_swap(),
     )?));
@@ -70,7 +73,6 @@ pub fn initialize_ram_data(
         &ram_group,
         "used_swap",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |system| system.used_swap(),
     )?));

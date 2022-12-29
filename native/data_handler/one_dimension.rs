@@ -1,12 +1,12 @@
 use std::cell::Ref;
 
 use anyhow::Result;
-use hdf5::{types::TypeDescriptor, Dataset, Extents, H5Type};
-use ndarray::s;
+use hdf5::{types::TypeDescriptor, Dataset, H5Type};
+use ndarray::{s, Array1};
 use sysinfo::System;
 
 use crate::{
-    types::{GroupOrFile, SystemPtr, Updatable},
+    types::{GroupOrFile, SystemPtr, Updatable, UpdateFunction},
     BUFFER_SIZE, TARGET,
 };
 
@@ -15,42 +15,37 @@ where
     T: H5Type,
 {
     dataset: Dataset,
-    update_fn: Box<dyn Fn(Ref<System>) -> T>,
+    update_fn: UpdateFunction<T>,
     system: SystemPtr,
-    buffer: Vec<Option<T>>,
-    depth: usize,
+    buffer1d: Array1<T>,
     dataset_index: usize,
+    buffer_index: usize,
 }
 
 impl<T> SensorDataHandler<T>
 where
-    T: H5Type + Clone + 'static,
+    T: H5Type + Clone + Default + 'static,
 {
     pub fn new(
         parent: &impl GroupOrFile,
         name: impl AsRef<str>,
         type_descriptor: TypeDescriptor,
-        depth: usize,
         sys: SystemPtr,
         func: impl Fn(Ref<System>) -> T + 'static,
     ) -> Result<Self> {
         let name = name.as_ref();
-        let extents = match depth {
-            0 => Extents::new(TARGET),
-            d => Extents::new((d, TARGET)),
-        };
+
         Ok(Self {
             dataset: parent
                 .builder()
-                // .chunk(chunk)
                 .empty_as(&type_descriptor)
-                .shape(extents)
+                .shape(TARGET)
                 .create(name)?,
             system: sys,
             update_fn: Box::new(func),
-            depth,
-            buffer: vec![None; BUFFER_SIZE],
+            buffer1d: Array1::from_elem(BUFFER_SIZE, T::default()),
             dataset_index: 0,
+            buffer_index: 0,
         })
     }
 }
@@ -63,58 +58,38 @@ where
         // Get new measurement
         let ret = (self.update_fn)(self.system.borrow());
 
-        // Find next unclaimed spot
-        if let Some(b_index) = self.buffer.iter().position(|e| e.is_none()) {
-            self.buffer[b_index] = Some(ret);
-        } else {
-            // Create temporary buffer
-            let temp: Vec<T> = self
-                .buffer
-                .iter_mut()
-                .map(|e| {
-                    let mut element: Option<T> = None;
-                    std::mem::swap(e, &mut element);
-                    element.unwrap()
-                })
-                .collect();
+        // Check if the buffer is full before continuing
+        if self.buffer_index == BUFFER_SIZE {
+            // Write to the buffer
+            self.dataset.write_slice(
+                &self.buffer1d,
+                s![self.dataset_index..self.dataset_index + BUFFER_SIZE],
+            )?;
 
-            // Now save it off
-            match self.depth {
-                0 => {
-                    let slice = s![self.dataset_index..self.dataset_index + BUFFER_SIZE];
-                    self.dataset.write_slice(&temp, slice)?;
-                }
-                _ => {
-                    let slice = s![.., self.dataset_index..self.dataset_index + BUFFER_SIZE];
-                    self.dataset.write_slice(&temp, slice)?;
-                }
-            };
-
-            self.buffer[0] = Some(ret);
-
-            // And now we move to the next part of the dataset
+            // Now update the indices
+            self.buffer_index = 0;
             self.dataset_index += BUFFER_SIZE;
-        };
+        }
+
+        // Add the newest measurement to the buffer
+        self.buffer1d[self.buffer_index] = ret;
+        self.buffer_index += 1;
+
         Ok(())
     }
 
     fn finalize(&mut self) -> Result<()> {
-        let final_buff: Vec<T> = self.buffer.iter().filter_map(|f| *f).collect();
+        // Create an owned subsection of the buffer array
+        let section_of_buffer = self.buffer1d.slice(s![..self.buffer_index]).to_owned();
 
-        // Now save it off
-        match self.depth {
-            0 => {
-                let slice = s![self.dataset_index..self.dataset_index + final_buff.len()];
-                self.dataset.write_slice(&final_buff, slice)?;
-            }
-            _ => {
-                let slice = s![
-                    ..,
-                    self.dataset_index..self.dataset_index + final_buff.len()
-                ];
-                self.dataset.write_slice(&final_buff, slice)?;
-            }
-        };
+        // Then write the remainder to the dataset file
+        self.dataset.write_slice(
+            &section_of_buffer,
+            s![
+                self.dataset_index..self.dataset_index + self.buffer_index
+            ],
+        )?;
+
         Ok(())
     }
 }

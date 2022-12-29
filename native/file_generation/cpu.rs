@@ -1,13 +1,15 @@
 use anyhow::Result;
 use hdf5::{types::TypeDescriptor::*, types::*, File, Group};
-use ndarray::array;
 use std::{
     rc::Rc,
     time::{SystemTime, UNIX_EPOCH},
 };
 use sysinfo::{CpuExt, SystemExt};
 
-use crate::types::{SensorList, SystemPtr};
+use crate::{
+    data_handler::{MultiSensorDataHandler, SensorDataHandler},
+    types::{SensorList, SystemPtr},
+};
 
 pub fn initialize_cpu_data(
     file: &File,
@@ -25,7 +27,6 @@ pub fn initialize_cpu_data(
         &cpu_group,
         "system_time",
         Unsigned(IntSize::U8),
-        0,
         Rc::clone(&sys),
         |_| -> u64 {
             SystemTime::now()
@@ -37,32 +38,44 @@ pub fn initialize_cpu_data(
 
     ////////////////////
     // Grouped CPU Usage
-    // cpu_sensors.push(Box::new(SensorDataHandler::new(
-    //     &cpu_group,
-    //     "grouped_cpu_usage",
-    //     Float(FloatSize::U4),
-    //     num_cpus,
-    //     Rc::clone(&sys),
-    //     |system| -> Vec<u32> {
-    //         let cpu_usage_tot: Vec<f32> = system.cpus().iter().map(|cpu| cpu.cpu_usage()).collect();
-    //         // data.write_slice(&cpu_usage_tot, s![.., index])?;
-    //         // Ok(())
-    //     },
-    // )?));
+    cpu_sensors.push(Box::new(MultiSensorDataHandler::new(
+        &cpu_group,
+        "grouped_cpu_usage",
+        Float(FloatSize::U4),
+        Rc::clone(&sys),
+        |system| {
+            // Create array of up to 20 cpus and store the usage
+            let mut ret_array = [0.0_f32; 20];
+            for (i, cpu) in system.cpus().iter().enumerate() {
+                if i >= 20 {
+                    continue;
+                };
+                ret_array[i] = cpu.cpu_usage();
+            }
+
+            ret_array
+        },
+    )?));
 
     // Grouped CPU Frequency
-    // cpu_sensors.push(Box::new(SensorDataHandler::new(
-    //     &cpu_group,
-    //     "grouped_cpu_frequency",
-    //     Unsigned(IntSize::U8),
-    //     num_cpus,
-    //     Rc::clone(&sys),
-    //     |data, system, index| {
-    //         let cpu_freq_list: Vec<_> = system.cpus().iter().map(|cpu| cpu.frequency()).collect();
-    //         data.write_slice(&cpu_freq_list, s![.., index])?;
-    //         Ok(())
-    //     },
-    // )?));
+    cpu_sensors.push(Box::new(MultiSensorDataHandler::new(
+        &cpu_group,
+        "grouped_cpu_frequency",
+        Unsigned(IntSize::U8),
+        Rc::clone(&sys),
+        |system| {
+            // Create array of up to 20 cpus and store the usage
+            let mut ret_array = [0u64; 20];
+            for (i, cpu) in system.cpus().iter().enumerate() {
+                if i >= 20 {
+                    continue;
+                };
+                ret_array[i] = cpu.frequency();
+            }
+
+            ret_array
+        },
+    )?));
 
     // Per-CPU Stats
     for (i, cpu) in sys.borrow().cpus().iter().enumerate() {
@@ -70,7 +83,6 @@ pub fn initialize_cpu_data(
             &cpu_group,
             format!("{}_usage", cpu.name()),
             Float(FloatSize::U4),
-            0,
             Rc::clone(&sys),
             move |system| system.cpus()[i].cpu_usage(),
         )?));
@@ -79,7 +91,6 @@ pub fn initialize_cpu_data(
             &cpu_group,
             format!("{}_frequency", cpu.name()),
             Unsigned(IntSize::U8),
-            0,
             Rc::clone(&sys),
             move |system| system.cpus()[i].frequency(),
         )?));

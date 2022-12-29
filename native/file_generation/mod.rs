@@ -1,10 +1,20 @@
-use std::{fs::remove_file, path::Path, time::SystemTime};
+use std::{
+    cell::RefCell,
+    fs::remove_file,
+    path::Path,
+    rc::Rc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 use sysinfo::SystemExt;
 
 use anyhow::Result;
-use hdf5::File;
+use hdf5::{types::IntSize, File};
 
-use crate::types::{SensorList, SystemPtr};
+use crate::{
+    data_handler::SensorDataHandler,
+    types::{SensorList, SystemPtr},
+    TARGET,
+};
 
 use comp::*;
 use cpu::*;
@@ -19,7 +29,6 @@ mod gpu;
 mod ram;
 
 pub fn initialize_data_file(sys: SystemPtr, sys_time: SystemTime) -> Result<(File, SensorList)> {
-    // let sys = sys.borrow_mut();
     // Remove data file if it already exists
     let file_path = Path::new("dataset.hdf5");
     if file_path.exists() {
@@ -57,10 +66,15 @@ pub fn initialize_data_file(sys: SystemPtr, sys_time: SystemTime) -> Result<(Fil
 
     // Get information about specific systems
     let (cpu, mut cpu_handlers) = initialize_cpu_data(&file, Rc::clone(&sys), sys_time)?;
+    println!("CPUS added");
     let (_ram, mut ram_handlers) = initialize_ram_data(&file, Rc::clone(&sys), sys_time)?;
+    println!("ram added");
     let (disk, mut disk_handlers) = initialize_disk_data(&file, Rc::clone(&sys), sys_time)?;
+    println!("disk added");
     let (gpu, mut gpu_handlers) = initialize_gpu_data(&file, Rc::clone(&sys), sys_time)?;
+    println!("gpu added");
     let mut comp_handlers = initialize_comp_data(&cpu, &disk, &gpu, Rc::clone(&sys))?;
+    println!("comps added");
 
     // Add handlers to the overall handler list
     sensor_handlers.append(&mut cpu_handlers);
@@ -73,8 +87,7 @@ pub fn initialize_data_file(sys: SystemPtr, sys_time: SystemTime) -> Result<(Fil
     sensor_handlers.push(Box::new(SensorDataHandler::new(
         &file,
         "system_time",
-        Unsigned(IntSize::U8),
-        0,
+        hdf5::types::TypeDescriptor::Unsigned(IntSize::U8),
         Rc::clone(&sys),
         |_| {
             SystemTime::now()
@@ -87,8 +100,7 @@ pub fn initialize_data_file(sys: SystemPtr, sys_time: SystemTime) -> Result<(Fil
     sensor_handlers.push(Box::new(SensorDataHandler::new(
         &file,
         "time_elapsed",
-        Unsigned(IntSize::U8),
-        0,
+        hdf5::types::TypeDescriptor::Unsigned(IntSize::U8),
         Rc::clone(&sys),
         move |_| {
             SystemTime::now()
@@ -103,12 +115,11 @@ pub fn initialize_data_file(sys: SystemPtr, sys_time: SystemTime) -> Result<(Fil
     sensor_handlers.push(Box::new(SensorDataHandler::new(
         &file,
         "measurements_taken",
-        Unsigned(IntSize::U8),
-        0,
+        hdf5::types::TypeDescriptor::Unsigned(IntSize::U8),
         Rc::clone(&sys),
         move |_| -> usize {
             let mut mt = clone.borrow_mut();
-            *mt = *mt + 1;
+            *mt *= 1;
             *mt
         },
     )?));
@@ -117,8 +128,7 @@ pub fn initialize_data_file(sys: SystemPtr, sys_time: SystemTime) -> Result<(Fil
     sensor_handlers.push(Box::new(SensorDataHandler::new(
         &file,
         "measurements_remaining",
-        Unsigned(IntSize::U8),
-        0,
+        hdf5::types::TypeDescriptor::Unsigned(IntSize::U8),
         Rc::clone(&sys),
         move |_| TARGET - *clone.borrow(),
     )?));

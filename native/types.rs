@@ -1,4 +1,7 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{
+    cell::{Ref, RefCell},
+    rc::Rc,
+};
 
 use anyhow::Result;
 use hdf5::DatasetBuilder;
@@ -6,6 +9,8 @@ use sysinfo::System;
 
 pub type SystemPtr = Rc<RefCell<System>>;
 pub type SensorList = Vec<Box<dyn Updatable>>;
+pub type UpdateFunction<T> = Box<dyn Fn(Ref<System>) -> T>;
+pub type StoredMultiSensorUpdateFunction<T, const D: usize> = Box<dyn Fn(Ref<System>) -> [T; D]>;
 
 pub trait GroupOrFile {
     fn builder(&self) -> DatasetBuilder;
@@ -24,7 +29,6 @@ impl GroupOrFile for hdf5::Group {
 
 impl GroupOrFile for hdf5::File {
     fn builder(&self) -> DatasetBuilder {
-        // self.new_dataset_builder()
         self.new_dataset_builder()
     }
 }

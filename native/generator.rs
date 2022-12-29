@@ -1,21 +1,8 @@
 use anyhow::Result;
-use hdf5::{
-    types::{FloatSize, IntSize, TypeDescriptor},
-    Dataset, DatasetBuilder, Extents, File, Group, H5Type,
-};
-use ndarray::{array, s, Array1, Array2, ArrayBase};
-use std::{
-    cell::{Ref, RefCell},
-    fs::remove_file,
-    path::Path,
-    rc::Rc,
-    time::{SystemTime, UNIX_EPOCH},
-};
-use sysinfo::{ComponentExt, CpuExt, CpuRefreshKind, DiskExt, RefreshKind, System, SystemExt};
-use types::*;
-use TypeDescriptor::*;
+use std::{cell::RefCell, rc::Rc, time::SystemTime};
+use sysinfo::SystemExt;
 
-use crate::data_handler::initialize_system;
+use crate::{data_handler::initialize_system, file_generation::initialize_data_file};
 
 const TARGET: usize = 10_800_000;
 const BUFFER_SIZE: usize = 120;
@@ -36,7 +23,7 @@ fn main() -> Result<()> {
 
     // Loop to collect data
     println!("Beginning to collect data...");
-    for index in 0..200 {
+    for index in 0..2000 {
         // Refresh system information
         {
             let mut sys_ref = sys.borrow_mut();

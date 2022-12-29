@@ -1,4 +1,4 @@
-use sysinfo::{CpuRefreshKind, RefreshKind, System};
+use sysinfo::{CpuRefreshKind, RefreshKind, System, SystemExt};
 
 mod one_dimension;
 mod two_dimension;
